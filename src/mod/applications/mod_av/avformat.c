@@ -3311,13 +3311,13 @@ GCC_DIAG_ON(deprecated-declarations)
 		}
 
 		if ((flags & SVR_BLOCK)) {
-			while (switch_micro_time_now() - mst->next_pts < -10000) {
-				// switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "yield, delta=%" SWITCH_INT64_T_FMT "\n", switch_micro_time_now() - mst->next_pts);
+			while (switch_time_now() - mst->next_pts < -10000) {
+				// switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "yield, delta=%" SWITCH_INT64_T_FMT "\n", switch_time_now() - mst->next_pts);
 				switch_yield(1000);
 			}
 			frame->img = img;
 		} else {
-			if (switch_micro_time_now() - mst->next_pts > -10000) {
+			if (switch_time_now() - mst->next_pts > -10000) {
 				frame->img = img;
 			} else {
 				switch_img_free(&context->last_img);
