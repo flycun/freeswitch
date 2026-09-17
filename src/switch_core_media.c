@@ -10547,6 +10547,29 @@ SWITCH_DECLARE(void) switch_core_media_gen_local_sdp(switch_core_session_t *sess
 		}
 	}
 
+	if ((var_val = switch_channel_get_variable(session->channel, "origination_video_mode"))) {
+		switch_media_flow_t vmode = SWITCH_MEDIA_FLOW_SENDRECV;
+		int valid = 0;
+
+		if (!strcasecmp(var_val, "sendrecv")) {
+			vmode = SWITCH_MEDIA_FLOW_SENDRECV; valid = 1;
+		} else if (!strcasecmp(var_val, "sendonly")) {
+			vmode = SWITCH_MEDIA_FLOW_SENDONLY; valid = 1;
+		} else if (!strcasecmp(var_val, "recvonly")) {
+			vmode = SWITCH_MEDIA_FLOW_RECVONLY; valid = 1;
+		} else if (!strcasecmp(var_val, "inactive")) {
+			vmode = SWITCH_MEDIA_FLOW_INACTIVE; valid = 1;
+		}
+
+		if (valid) {
+			switch_core_media_set_smode(smh->session, SWITCH_MEDIA_TYPE_VIDEO, vmode, sdp_type);
+		} else {
+			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_WARNING,
+							  "Invalid origination_video_mode [%s], expecting sendrecv|sendonly|recvonly|inactive\n", var_val);
+		}
+		switch_channel_set_variable(session->channel, "origination_video_mode", NULL);
+	}
+
 	if (!smh->owner_id) {
 		smh->owner_id = (uint32_t)(switch_time_t)switch_epoch_time_now(NULL) - port;
 	}

@@ -3764,10 +3764,16 @@ SWITCH_STANDARD_API(uuid_media_3p_function)
 	return SWITCH_STATUS_SUCCESS;
 }
 
-#define MEDIA_RENEG_SYNTAX "<uuid>[ <codec_string>]"
+#define MEDIA_RENEG_SYNTAX "<uuid>[ <codec_string>[ <video_mode>]]"
+static int is_video_direction(const char *s)
+{
+	return !zstr(s) && (!strcasecmp(s, "sendrecv") || !strcasecmp(s, "sendonly") ||
+						!strcasecmp(s, "recvonly") || !strcasecmp(s, "inactive"));
+}
+
 SWITCH_STANDARD_API(uuid_media_neg_function)
 {
-	char *mycmd = NULL, *argv[2] = { 0 };
+	char *mycmd = NULL, *argv[3] = { 0 };
 	int argc = 0;
 	switch_status_t status = SWITCH_STATUS_FALSE;
 
@@ -3781,9 +3787,33 @@ SWITCH_STANDARD_API(uuid_media_neg_function)
 		switch_core_session_message_t msg = { 0 };
 		switch_core_session_t *lsession = NULL;
 		char *uuid = argv[0];
+		char *codec = NULL, *vmode = NULL;
+		int bad_arg = 0;
+		int i;
+
+		/* the direction token is accepted in place of the codec string or after it */
+		for (i = 1; i < argc && i < 3; i++) {
+			if (zstr(argv[i])) continue;
+			if (is_video_direction(argv[i])) {
+				if (vmode) { bad_arg = 1; break; }
+				vmode = argv[i];
+			} else if (!codec) {
+				codec = argv[i];
+			} else {
+				bad_arg = 1;
+				break;
+			}
+		}
+
+		if (bad_arg) {
+			stream->write_function(stream, "-ERR unexpected argument, usage: %s\n"
+									"video_mode is one of sendrecv|sendonly|recvonly|inactive\n", MEDIA_RENEG_SYNTAX);
+			switch_safe_free(mycmd);
+			return SWITCH_STATUS_SUCCESS;
+		}
 
 		msg.message_id = SWITCH_MESSAGE_INDICATE_MEDIA_RENEG;
-		msg.string_arg = argv[1];
+		msg.string_arg = codec;
 		msg.from = __FILE__;
 
 		if (*uuid == '+') {
@@ -3792,6 +3822,9 @@ SWITCH_STANDARD_API(uuid_media_neg_function)
 		}
 
 		if ((lsession = switch_core_session_locate(uuid))) {
+			if (vmode) {
+				switch_channel_set_variable(switch_core_session_get_channel(lsession), "origination_video_mode", vmode);
+			}
 			status = switch_core_session_receive_message(lsession, &msg);
 			switch_core_session_rwunlock(lsession);
 		}
