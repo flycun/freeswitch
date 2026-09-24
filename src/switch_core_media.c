@@ -6708,8 +6708,12 @@ SWITCH_DECLARE(void) switch_core_session_write_blank_video(switch_core_session_t
 	width = smh->vid_params.width;
 	height = smh->vid_params.height;
 
-	if (!width) width = 352;
-	if (!height) height = 288;
+	/* fs-web patch (2026-09-25): raise blank-video canvas default from CIF 352x288
+	 * to 720p so file-playback (fs_3.lua video_file) is not pinned to CIF.
+	 * The first frame through the write path pins smh->vid_params.d_width/d_height
+	 * for the whole call, so this default IS the p2p playback canvas. */
+	if (!width) width = 1280;
+	if (!height) height = 720;
 	if (!fps) fps = 15;
 
 	fr.packet = buf;
@@ -7493,7 +7497,9 @@ static void *SWITCH_THREAD_FUNC video_helper_thread(switch_thread_t *thread, voi
 
 	if (!blank_img) {
 		switch_color_set_rgb(&bgcolor, "#000000");
-		if ((blank_img = switch_img_alloc(NULL, SWITCH_IMG_FMT_I420, 352, 288, 1))) {
+		/* fs-web patch (2026-09-25): match the raised 720p blank default above —
+		 * a small handle-level blank would re-pin vid_params.d_* low before real frames. */
+		if ((blank_img = switch_img_alloc(NULL, SWITCH_IMG_FMT_I420, 1280, 720, 1))) {
 			switch_img_fill(blank_img, 0, 0, blank_img->d_w, blank_img->d_h, &bgcolor);
 		}
 	}
