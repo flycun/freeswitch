@@ -6861,6 +6861,16 @@ static void *SWITCH_THREAD_FUNC video_write_thread(switch_thread_t *thread, void
 				
 				if (fr.img && smh->vid_params.d_width && smh->vid_params.d_height) {
 					switch_img_fit(&fr.img, smh->vid_params.d_width, smh->vid_params.d_height, SWITCH_FIT_SIZE);
+					/* fs-web patch (2026-09-25): keep frames even-sized — H264/libx264 cannot
+					 * open odd dims (e.g. portrait 720x1280 fit into 720p canvas -> 405x720
+					 * breaks the encoder re-init and the endpoint receives no video at all).
+					 * Letterbox onto the exact (even) canvas: constant wire size, content
+					 * ratio preserved, endpoints letterbox on display anyway. */
+					if (fr.img && (fr.img->d_w % 2 || fr.img->d_h % 2)) {
+						switch_image_t *lb = NULL;
+						switch_img_letterbox(fr.img, &lb, smh->vid_params.d_width & ~1, smh->vid_params.d_height & ~1, "#000000f");
+						if (lb) { switch_img_free(&fr.img); fr.img = lb; }
+					}
 				}
 
 				switch_core_session_write_video_frame(session, &fr, SWITCH_IO_FLAG_FORCE, 0);
