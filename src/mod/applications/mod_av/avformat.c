@@ -3519,6 +3519,11 @@ SWITCH_MODULE_LOAD_FUNCTION(mod_avformat_load)
 	supported_formats[i++] = "mov";
 	supported_formats[i++] = "mkv";
 	supported_formats[i++] = "webm";
+	/* fs-web patch (2026-09-25): register 3gp — phone-recorded media (H264 + AMR-WB).
+	 * Without this, switch_core_file_open rejects the extension at the routing layer
+	 * ("Invalid file format [3gp]") before libav ever sees the file, even though the
+	 * mov/3gp demuxer and amrwb decoder are available. */
+	supported_formats[i++] = "3gp";
 	//supported_formats[i++] = "wav";
 
 	file_interface = (switch_file_interface_t *)switch_loadable_module_create_interface(*module_interface, SWITCH_FILE_INTERFACE);
