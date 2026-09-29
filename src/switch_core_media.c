@@ -14752,7 +14752,11 @@ SWITCH_DECLARE(switch_status_t) switch_core_session_write_video_frame(switch_cor
 		return SWITCH_STATUS_SUCCESS;
 	}
 
-	if (!(switch_channel_test_flag(session->channel, CF_VIDEO_READY) || (flags & SWITCH_IO_FLAG_FORCE))) {
+	/* fork(fsweb): sendonly 单向推流腿不受 CF_VIDEO_READY 闸门拦截——READY 的复位路径依赖收到
+	 * 对端视频解码（视频线程 CF_VIDEO_DECODED_READ），纯推流腿永远不满足；媒体重置路径会清此
+	 * 标志（reneg 重协商后），清后无复位路径 → 播放帧在本闸门被静默丢弃 → 推流腿画面中途冻结 */
+	if (!(switch_channel_test_flag(session->channel, CF_VIDEO_READY) || (flags & SWITCH_IO_FLAG_FORCE)) &&
+	    switch_core_session_media_flow(session, SWITCH_MEDIA_TYPE_VIDEO) != SWITCH_MEDIA_FLOW_SENDONLY) {
 		return SWITCH_STATUS_SUCCESS;
 	}
 

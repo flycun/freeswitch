@@ -3072,6 +3072,128 @@ SWITCH_STANDARD_APP(playback_function)
 
 
 
+/* fork(fsweb): video_source <file> — 独立线程视频源 app（数字人形象源专用，2026-09-29）
+ * 三个既有模型都无法满足「TTS 播报期间视频连续」：
+ * ① endless_playback + speak 嵌套：speak 在 play_file 帧循环内嵌套执行，帧循环被挂起
+ *   ——抓包实证话术期零视频包（README 9510 时代"话术期间画面定格"即此机制）；
+ * ② uuid_broadcast：event-lock 播放阻塞 app 队列，后续 speak 被压到文件播完才执行；
+ * ③ conference：交互原语（collect/sleep/DTMF）全部失效。
+ * 本 app 起独立线程：只读文件视频帧（SVR_BLOCK 时钟自节拍）→ write_video_frame 写通道。
+ * 不读音频（不与 app/park 的音频读循环竞争）、不解析事件（永不被嵌套 app 挂起）、
+ * app 立即返回（不阻塞 app 队列）。线程每帧检查通道变量 video_source_file：
+ *   <新路径> = 热切换文件（帧间生效）；stop = 停止退出。挂断自退。
+ * 注意：一个通道只 exec 一次（多次 exec 会多线程双写竞争 write mutex）。 */
+typedef struct {
+	switch_core_session_t *session;
+	switch_memory_pool_t *pool;
+	switch_bool_t running;
+	uint32_t frames;
+} video_source_t;
+
+static void *SWITCH_THREAD_FUNC video_source_thread(switch_thread_t *thread, void *obj)
+{
+	video_source_t *vs = (video_source_t *) obj;
+	switch_core_session_t *session = vs->session;
+	switch_channel_t *channel = switch_core_session_get_channel(session);
+	switch_file_handle_t fh = { 0 };
+	switch_frame_t fr = { 0 };
+	char cur[512] = { 0 };
+	switch_status_t status;
+
+	if (switch_core_session_read_lock(session) != SWITCH_STATUS_SUCCESS) {
+		vs->running = 0;
+		return NULL;
+	}
+
+	/* 帧缓冲预置（对齐核心视频线程 blank 帧写法：write 路径会向 packet/data 拷贝，
+	 * 只填 img 不预置缓冲 = NULL memcpy 段错误——2026-09-29 两次崩溃实证） */
+	{
+		unsigned char *buf = switch_core_session_alloc(session, SWITCH_RTP_MAX_BUF_LEN);
+		memset(&fr, 0, sizeof(fr));
+		fr.packet = buf;
+		fr.packetlen = SWITCH_RTP_MAX_BUF_LEN;
+		fr.data = buf + 12;
+		fr.buflen = SWITCH_RTP_MAX_BUF_LEN - 12;
+	}
+
+	while (switch_channel_up_nosig(channel) && vs->running) {
+		char want[512] = { 0 };
+		const char *w = switch_channel_get_variable(channel, "video_source_file");
+
+		if (!zstr(w)) switch_copy_string(want, w, sizeof(want));
+		if (!strcmp(want, "stop")) break;
+		if (!*want && !*cur) break;   // 变量被清且无从循环：退出
+
+		if (*want && strcmp(want, cur)) {
+			/* 热切换（含首启）：关旧开新 */
+			if (*cur) switch_core_file_close(&fh);
+			memset(&fh, 0, sizeof(fh));
+			if (switch_core_file_open(&fh, want, 0, 8000, SWITCH_FILE_FLAG_READ | SWITCH_FILE_FLAG_VIDEO, NULL) != SWITCH_STATUS_SUCCESS) {
+				switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "video_source open fail: %s\n", want);
+				break;
+			}
+			switch_copy_string(cur, want, sizeof(cur));
+		}
+
+		/* 变量为空但已有文件：保持当前文件循环（变量只在切换/停止时写） */
+
+		fr.img = NULL;   // 保留预置的 packet/data 缓冲（上帧 img 已 write 后释放）
+		status = switch_core_file_read_video(&fh, &fr, SVR_BLOCK);
+
+		if (vs->frames < 5 || (vs->frames % 1000) == 0) {
+			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
+							  "video_source #%u status=%d img=%p %ux%u\n", vs->frames, status, (void *) fr.img,
+							  fr.img ? fr.img->d_w : 0, fr.img ? fr.img->d_h : 0);
+		}
+		vs->frames++;
+
+		if ((status == SWITCH_STATUS_SUCCESS || status == SWITCH_STATUS_MORE_DATA) && fr.img) {
+			switch_core_session_write_video_frame(session, &fr, SWITCH_IO_FLAG_FORCE, 0);
+			switch_img_free(&fr.img);   // read_video 交出的 img 归调用方
+			continue;
+		}
+
+		if (status != SWITCH_STATUS_SUCCESS && status != SWITCH_STATUS_MORE_DATA) {
+			/* EOF/错误：重开当前文件循环播 */
+			switch_core_file_close(&fh);
+			memset(&fh, 0, sizeof(fh));
+			if (*cur && switch_core_file_open(&fh, cur, 0, 8000, SWITCH_FILE_FLAG_READ | SWITCH_FILE_FLAG_VIDEO, NULL) == SWITCH_STATUS_SUCCESS) {
+				switch_yield(1000);
+			} else {
+				break;
+			}
+		}
+	}
+
+	if (*cur) switch_core_file_close(&fh);
+	switch_channel_set_variable(channel, "video_source_file", NULL);
+	switch_core_session_rwunlock(session);
+	vs->running = 0;
+	return NULL;
+}
+
+SWITCH_STANDARD_APP(video_source_function)
+{
+	switch_channel_t *channel = switch_core_session_get_channel(session);
+	switch_memory_pool_t *pool = switch_core_session_get_pool(session);
+	switch_thread_t *thread = NULL;
+	switch_threadattr_t *thd_attr = NULL;
+	video_source_t *vs;
+
+	if (zstr(data)) return;
+	switch_channel_set_variable(channel, "video_source_file", data);
+
+	vs = switch_core_alloc(pool, sizeof(*vs));
+	vs->session = session;
+	vs->pool = pool;
+	vs->running = 1;
+
+	switch_threadattr_create(&thd_attr, pool);
+	switch_threadattr_detach_set(thd_attr, 1);
+	switch_threadattr_stacksize_set(thd_attr, SWITCH_THREAD_STACKSIZE);
+	switch_thread_create(&thread, thd_attr, video_source_thread, vs, pool);
+}
+
 SWITCH_STANDARD_APP(endless_playback_function)
 {
 	switch_channel_t *channel = switch_core_session_get_channel(session);
@@ -3079,7 +3201,18 @@ SWITCH_STANDARD_APP(endless_playback_function)
 	const char *file = data;
 
 	while (switch_channel_ready(channel)) {
-		status = switch_ivr_play_file(session, NULL, file, NULL);
+		/* fork(fsweb) 两变量扩展（数字人形象源热切换）：
+		 * - endless_playback_stop=true + uuid_break：跳出循环真停播（原生语义 BREAK 只断当前
+		 *   文件迭代、循环重启文件，外界无法停播；DTMF 的 BREAK 不带变量仍走重启，向后兼容）
+		 * - endless_playback_file=<path> + uuid_break：循环顶热切换文件——app 不退出（无 app
+		 *   队列往返/完成事件等待/媒体闸门重建间隙），切换窗口≈一个迭代边界，防黑屏闪动 */
+		const char *hot;
+		if (switch_true(switch_channel_get_variable(channel, "endless_playback_stop"))) {
+			status = SWITCH_STATUS_BREAK;
+			break;
+		}
+		hot = switch_channel_get_variable(channel, "endless_playback_file");
+		status = switch_ivr_play_file(session, NULL, hot ? hot : file, NULL);
 
 		if (status != SWITCH_STATUS_SUCCESS && status != SWITCH_STATUS_BREAK) {
 			break;
@@ -6791,6 +6924,9 @@ SWITCH_MODULE_LOAD_FUNCTION(mod_dptools_load)
 	SWITCH_ADD_APP(app_interface, "broadcast", "Broadcast File", "Broadcast a file to the session", broadcast_function, "<path> <leg>", SAF_NONE);
 	SWITCH_ADD_APP(app_interface, "endless_playback", "Playback File Endlessly", "Endlessly Playback a file to the channel",
 				   endless_playback_function, "<path>", SAF_NONE);
+	/* fork(fsweb): 数字人形象源（独立线程视频源，热切换见 video_source_file 变量） */
+	SWITCH_ADD_APP(app_interface, "video_source", "Independent Video Source Thread", "Play a video file on an independent thread (not suspended by nested apps, does not block app queue)",
+				   video_source_function, "<path>", SAF_NONE);
 	SWITCH_ADD_APP(app_interface, "loop_playback", "Playback File looply", "Playback a file to the channel looply for limted times",
 				   loop_playback_function, "[+loops] <path>", SAF_NONE);
 	SWITCH_ADD_APP(app_interface, "att_xfer", "Attended Transfer", "Attended Transfer", att_xfer_function, "<channel_url>", SAF_NONE);
