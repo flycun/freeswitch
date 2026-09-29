@@ -6708,8 +6708,13 @@ SWITCH_DECLARE(void) switch_core_session_write_blank_video(switch_core_session_t
 	width = smh->vid_params.width;
 	height = smh->vid_params.height;
 
-	if (!width) width = 352;
-	if (!height) height = 288;
+	/* fs-web patch (2026-09-25): blank-video canvas default raised from CIF 352x288
+	 * to 720p **portrait 720x1280** — primary viewers are phones held in portrait;
+	 * portrait sources fill edge-to-edge, landscape ones letterbox (acceptable).
+	 * The first frame through the write path pins smh->vid_params.d_width/d_height
+	 * for the whole call, so this default IS the p2p playback canvas. */
+	if (!width) width = 720;
+	if (!height) height = 1280;
 	if (!fps) fps = 15;
 
 	fr.packet = buf;
@@ -6857,6 +6862,16 @@ static void *SWITCH_THREAD_FUNC video_write_thread(switch_thread_t *thread, void
 				
 				if (fr.img && smh->vid_params.d_width && smh->vid_params.d_height) {
 					switch_img_fit(&fr.img, smh->vid_params.d_width, smh->vid_params.d_height, SWITCH_FIT_SIZE);
+					/* fs-web patch (2026-09-25): keep frames even-sized — H264/libx264 cannot
+					 * open odd dims (e.g. portrait 720x1280 fit into 720p canvas -> 405x720
+					 * breaks the encoder re-init and the endpoint receives no video at all).
+					 * Letterbox onto the exact (even) canvas: constant wire size, content
+					 * ratio preserved, endpoints letterbox on display anyway. */
+					if (fr.img && (fr.img->d_w % 2 || fr.img->d_h % 2)) {
+						switch_image_t *lb = NULL;
+						switch_img_letterbox(fr.img, &lb, smh->vid_params.d_width & ~1, smh->vid_params.d_height & ~1, "#000000f");
+						if (lb) { switch_img_free(&fr.img); fr.img = lb; }
+					}
 				}
 
 				switch_core_session_write_video_frame(session, &fr, SWITCH_IO_FLAG_FORCE, 0);
@@ -7493,7 +7508,9 @@ static void *SWITCH_THREAD_FUNC video_helper_thread(switch_thread_t *thread, voi
 
 	if (!blank_img) {
 		switch_color_set_rgb(&bgcolor, "#000000");
-		if ((blank_img = switch_img_alloc(NULL, SWITCH_IMG_FMT_I420, 352, 288, 1))) {
+		/* fs-web patch (2026-09-25): match the raised portrait 720x1280 blank default above —
+		 * a small handle-level blank would re-pin vid_params.d_* low before real frames. */
+		if ((blank_img = switch_img_alloc(NULL, SWITCH_IMG_FMT_I420, 720, 1280, 1))) {
 			switch_img_fill(blank_img, 0, 0, blank_img->d_w, blank_img->d_h, &bgcolor);
 		}
 	}
